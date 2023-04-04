@@ -21,15 +21,3 @@ jobs:
         cache: maven
     - name: Build with Maven
       run: mvn -B package --file pom.xml
-      - name: Download and extract SonarQube
-  uses: actions/download-artifact@v2
-  with:
-    name: sonarqube
-    path: /tmp/sonarqube.tar.gz
-
-- name: Extract SonarQube
-  uses: actions/extract-archive@v2
-  with:
-    archive-path: /tmp/sonarqube.tar.gz
-    destination: /opt/sonarqube
-
