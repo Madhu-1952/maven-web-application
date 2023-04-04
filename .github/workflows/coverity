@@ -1,0 +1,34 @@
+name: Coverity Scan
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      
+      - name: Set up Coverity
+        uses: coverity/coverity-action@v1.0.0
+        with:
+          project-name: my-project
+          build-command: |
+            make clean
+            make
+
+      - name: Run Coverity analysis
+        run: cov-analyze --dir cov-int make
+
+      - name: Submit results to Coverity
+        uses: coverity/coverity-action@v1.0.0
+        with:
+          command: upload
+          username: ${{ secrets.COVERITY_USERNAME }}
+          password: ${{ secrets.COVERITY_PASSWORD }}
+          project-name: my-project
+          build-command: |
+            make clean
+            make
+          email-notification: none
