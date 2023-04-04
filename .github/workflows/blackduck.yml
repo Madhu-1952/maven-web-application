@@ -1,0 +1,40 @@
+name: Black Duck Scan
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      
+      - name: Set up Java
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
+
+      - name: Download Black Duck scan CLI
+        run: |
+          wget https://download.blackducksoftware.com/api/v1/download?token=<YOUR_TOKEN>&amp;url=<BLACK_DUCK_SERVER_URL>/api/download/cli/linux -O blackduck.zip
+          unzip blackduck.zip
+
+      - name: Black Duck scan
+        env:
+          BD_URL: "<BLACK_DUCK_SERVER_URL>"
+          BD_USERNAME: ${{ secrets.BD_USERNAME }}
+          BD_PASSWORD: ${{ secrets.BD_PASSWORD }}
+          BD_PROJECT_NAME: "my-project"
+          BD_VERSION_NAME: "my-version"
+        run: |
+          ./blackduck/bin/bdscan --scan --blackduck.url $BD_URL --blackduck.username $BD_USERNAME --blackduck.password $BD_PASSWORD --detect.project.name $BD_PROJECT_NAME --detect.project.version.name $BD_VERSION_NAME --detect.blackduck.signature.scanner.paths="./,**/*.jar,**/*.war,**/*.ear"
+
+      - name: Publish Black Duck scan results
+        uses: blackducksoftware/hub-github-action@v1.1.0
+        with:
+          bd_url: "<BLACK_DUCK_SERVER_URL>"
+          bd_token: ${{ secrets.BD_API_TOKEN }}
+          project_name: "my-project"
+          project_version_name: "my-version"
+          fail_on_policy_violation: true
