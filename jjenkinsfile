@@ -1,0 +1,205 @@
+def JENKINS_SLAVE_IMAGE = '631375014002.dkr.ecr.us-east-1.amazonaws.com/renewables-uai2008400-onewind-dev-ecr:jenkins-slave-v13'
+def JENKINS_SLAVE_CONTAINER_NAME = 'jenkinsslave'
+def KUBECONFIG = 'kubeconfig'
+def CLOUD_NAME = 'kubernetes'
+def JENKINS_URL = 'http://jenkins-master.configurator-dev.svc.cluster.local:8080/'
+def JENKINS_WORKING_DIR = '/home/jenkins/agent'
+
+def dockerImage = ''
+def VERSION_PREFIX = '-v'
+def COMMIT_NUM = ''
+def IMAGE = ''
+def APP_NAME = 'queue-manager-svc-dev'
+def DEPLOYMENT_NAME = 'queue-manager-svc-dev'
+def HELM_NAME = 'queue-manager-svc-dev'
+def HELM_LOCATION = 'queue-manager-core/devops/dev/helm'
+def HELM_VALUES_LOCATION ='queue-manager-core/devops/dev/helm/values.yaml'
+List IMAGE_TAGS = []
+def NEXT_VERSION_NUM = 1;
+def doesBuildExists = 0;
+
+def ECR_URL = '631375014002.dkr.ecr.us-east-1.amazonaws.com'
+def ECR_FOLDER = 'renewables-uai2008400-onewind-dev-ecr'
+def AWS_REGION = 'us-east-1'
+def NAMESPACE = 'studio-dev'
+
+def GIT_URL = 'https://github.build.ge.com/OneWind/ren-onewind-studio-backend-queue-manager-service.git'
+def SECURITY_JAR_GIT_URL = ''
+def SECURITY_JAR_GIT_BRANCH = ''
+def GIT_CREDENTIAL = 'git-creds'
+
+podTemplate(
+  cloud: CLOUD_NAME,
+  label: BUILD_TAG,
+  nodeSelector: 'role=uai2008400-10xslave',
+  serviceAccount: 'jenkins',
+  containers: [
+      containerTemplate(
+       name: JENKINS_SLAVE_CONTAINER_NAME,
+       image: JENKINS_SLAVE_IMAGE,
+       ttyEnabled: true,
+	   privileged: true,
+       command: 'cat',
+	   alwaysPullImage: false,
+	   workingDir: JENKINS_WORKING_DIR,
+	   envVars: [
+            envVar(key: 'JENKINS_URL', value: JENKINS_URL)
+        ]
+	   )
+  ],
+  volumes: [
+    emptyDirVolume(mountPath: JENKINS_WORKING_DIR, memory: false),
+    hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock')
+  ],
+  annotations: [
+    podAnnotation(key: "kubernetes.io/psp", value: "eks.privileged")
+  ]
+  ) {
+
+    node(BUILD_TAG) {
+    // Run job inside the Slave POD
+	try {
+		container(JENKINS_SLAVE_CONTAINER_NAME) {
+          	// Running on Slave container...
+
+			stage ('GIT Checkout Stage') {
+
+			    // Git checkout
+				println "GIT_BRANCH env: ${scm.branches[0].name}"
+	            checkout changelog: false, poll: false, scm: [$class: 'GitSCM', branches: [[name: scm.branches[0].name]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CloneOption', depth: 1, honorRefspec: true, noTags: true, reference: '', shallow: true]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: GIT_CREDENTIAL, url: GIT_URL]]]
+
+	            gitCommitHash = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                COMMIT_NUM = gitCommitHash.take(7)
+
+            }
+
+
+				stage('Fetch existing image tags from ECR')
+	        {
+	            script
+                {
+                	// AWS ECR Login
+					sh("eval \$(aws ecr get-login --no-include-email --region ${AWS_REGION} | sed 's|https://||')")
+
+					// Fetch the list of image tags from ECR and sort them on the basis of timestamp
+					IMAGE_TAGS = sh( script: "aws ecr describe-images --region us-east-1 --repository-name ${ECR_FOLDER} --filter 'tagStatus=ANY' --query 'sort_by(imageDetails,& imagePushedAt)[*].imageTags[0]|[?starts_with(@, `queue-manager-svc-dev-v`)]' | tr -d ',' | tr -d '\"' | tr -d '[' | tr -d ']' | tr -d ' '"
+					, returnStdout: true).trim().split('\n')
+
+					// Check if a build has already been created for this commit or not
+					IMAGE_TAGS.each{item ->
+					    println "Inside loop"
+						def imageTag = item.split()
+						if (imageTag.size() > 0) {
+							def tagNameArray = imageTag[0].split(VERSION_PREFIX)
+							if(tagNameArray.size() > 1) {
+								def tagVersionArray = tagNameArray[1].split('-')
+								if (tagVersionArray.size() > 1 && tagVersionArray[1] == COMMIT_NUM) {
+									doesBuildExists = 1
+									println "Build for Commit Number = ${tagVersionArray[1]} has already been created!"
+								}
+							}
+						}
+					}
+                }
+	        }			
+				
+			stage ('Compile Stage and build stage') {
+           		if (doesBuildExists == 0) {
+	           		script {
+						withCredentials([file(credentialsId: 'newsettings', variable: 'newsettings')]) {
+								sh 'mvn -U -s $newsettings clean install deploy -DskipTests' 
+							
+						}										
+				    }
+				}
+			}
+		
+			stage('Image tag preparations')
+	        {
+	            script
+                {
+					println "${doesBuildExists}"
+                	if (doesBuildExists == 0) {
+
+						// GET THE NEXT IMAGE TAG VERSION NUMBER
+						if (IMAGE_TAGS != null && IMAGE_TAGS.size() > 0) {
+							def IMAGE_TAGS_LEN = IMAGE_TAGS.size()-1
+							if (IMAGE_TAGS[IMAGE_TAGS_LEN] != null && IMAGE_TAGS[IMAGE_TAGS_LEN].trim() != '') {
+									def tagNameArray = IMAGE_TAGS[IMAGE_TAGS_LEN].split(VERSION_PREFIX)
+									def tagVersionArray = tagNameArray[1].split('-')
+									NEXT_VERSION_NUM = Integer.valueOf(tagVersionArray[0]) + 1
+							}
+						}
+
+						// CREATE NEW IMAGE TAG NAME (using the ${NEXT_VERSION_NUM} value as version#)
+						IMAGE = "${ECR_URL}/${ECR_FOLDER}:${APP_NAME}-v${NEXT_VERSION_NUM}-${COMMIT_NUM}"
+						echo "$IMAGE"
+					}
+                }
+	        }
+			stage('Build image') {
+				script {
+					if (doesBuildExists == 0) {
+						//Docker - Build Image
+						//sh ("docker build --network=host -f queue-manager-core/devops/dev/Dockerfile --tag=${IMAGE} --no-cache --pull .")
+					} 
+				}
+			}
+			stage('Pushing image to ECR') {
+				script {
+					if (doesBuildExists == 0) {
+						//Docker - Push Image
+						//sh("docker push ${IMAGE}")
+
+						//Docker - Delete Image Tag after Push to ECR
+						//sh("docker rmi ${IMAGE}")
+					}
+				}
+			}
+			stage('Deploy to K8S') {
+               //Helpful for redeploying existing image
+                if (doesBuildExists == 1) {
+                    IMAGE = "${ECR_URL}/${ECR_FOLDER}:${IMAGE_TAGS[IMAGE_TAGS.size()-1]}"
+                }
+					withCredentials([file(credentialsId: 'studio_ui_dev_k8_config', variable: 'KUBECONFIG')]) {
+						sh("kubectl get pod -n ${NAMESPACE}")
+						sh("helm ls -n ${NAMESPACE}")
+					
+						// Inject the new Image tag into the values yaml file
+						sh("sed -i 's|dockerImage|${IMAGE}|g' ${HELM_VALUES_LOCATION}")
+					
+						/* Enable below 2 lines if you want to uninstall the existing deployment and install a new one. */
+						//sh("helm uninstall ${HELM_NAME} -n ${NAMESPACE}")
+						//sh("helm install ${HELM_NAME} ${HELM_LOCATION} -n ${NAMESPACE}")
+					
+						/* Execute below line to upgrade the existing deployment. */
+						//sh("helm upgrade ${HELM_NAME} ${HELM_LOCATION} -n ${NAMESPACE}")
+						//sh("kubectl rollout restart deployment ${DEPLOYMENT_NAME} -n ${NAMESPACE}")
+						//sh("kubectl get pod -n ${NAMESPACE}")
+						//sh("helm ls -n ${NAMESPACE}")
+                }
+            }
+    	}
+			currentBuild.result = 'SUCCESS'
+		} catch (any) {
+			currentBuild.result = 'FAILURE'
+		} finally {
+			if (currentBuild.result == 'SUCCESS') {
+				emailext (
+					from: 'ren-dt-jenkins@gmail.com',
+					subject: 'Deployment completed for queue-manager-service in DEV Space',
+					body: "Hi all\n   Your pipeline: '${env.JOB_NAME} [${env.BUILD_NUMBER}]': was successful.\n   Git branch used: ${scm.branches[0].name}.\n   Check console output at ${env.BUILD_URL}/console for more information.\nThank you!",
+					to: 'samba.vema@gmail.com'
+				);
+			}
+			else {
+				emailext (
+					from: 'ren-dt-jenkins@gmail.com',
+					subject: 'Deployment completed for queue-manager-service in DEV Space',
+					body: "Hi \n   Your pipeline: '${env.JOB_NAME} [${env.BUILD_NUMBER}]': has an error.\n   Git branch used: ${scm.branches[0].name}.\n   Check console output at ${env.BUILD_URL}/console for more information.\nThank you!",
+					to: 'samba.vema@gmail.com'
+				)
+			}
+		}
+    }
+}
